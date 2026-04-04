@@ -370,14 +370,14 @@ func (p *OrmPlugin) parseManyToMany(msg *generator.Descriptor, ormable *OrmableT
 }
 
 func (p *OrmPlugin) findPrimaryKey(ormable *OrmableType) (string, *Field) {
-	for fieldName, field := range ormable.Fields {
-		if field.GetTag().GetPrimaryKey() {
-			return fieldName, field
+	for _, fieldName := range p.getSortedFieldNames(ormable.Fields) {
+		if ormable.Fields[fieldName].GetTag().GetPrimaryKey() {
+			return fieldName, ormable.Fields[fieldName]
 		}
 	}
-	for fieldName, field := range ormable.Fields {
+	for _, fieldName := range p.getSortedFieldNames(ormable.Fields) {
 		if strings.ToLower(fieldName) == "id" {
-			return fieldName, field
+			return fieldName, ormable.Fields[fieldName]
 		}
 	}
 	p.Fail("Primary key cannot be found in", ormable.Name, ".")
