@@ -189,6 +189,7 @@ func parseParameter(param string) map[string]string {
 type OrmableType struct {
 	File       *protogen.File
 	Fields     map[string]*Field
+	FieldOrder []string
 	Methods    []*autogenMethod
 	Name       string
 	OriginName string
@@ -201,6 +202,7 @@ func NewOrmableType(originalName string, pkg string, file *protogen.File) *Ormab
 		Package:    pkg,
 		File:       file,
 		Fields:     make(map[string]*Field),
+		FieldOrder: make([]string, 0),
 		Methods:    []*autogenMethod{},
 	}
 }
@@ -454,14 +456,17 @@ func (b *ORMBuilder) generateOrmable(g *protogen.GeneratedFile, message *protoge
 	ormable := b.getOrmable(message.GoIdent.GoName)
 	g.P(`type `, ormable.Name, ` struct {`)
 
-	var names []string
-	for name := range ormable.Fields {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	// var names []string
+	// for name := range ormable.Fields {
+	// 	names = append(names, name)
+	// }
+	// sort.Strings(names)
 
-	for _, name := range names {
-		field := ormable.Fields[name]
+	for _, name := range ormable.FieldOrder {
+		field, ok := ormable.Fields[name]
+		if !ok {
+			continue // 防御性检查，避免字段不存在
+		}
 		sp := strings.Split(field.TypeName, ".")
 
 		if len(sp) == 2 && sp[1] == "UUID" {
@@ -487,6 +492,17 @@ func (b *ORMBuilder) generateOrmable(g *protogen.GeneratedFile, message *protoge
 
 	g.P(`}`)
 	g.P()
+}
+
+// addFieldToOrder 安全追加字段到 FieldOrder，去重
+func (b *ORMBuilder) addFieldToOrder(orm *OrmableType, fieldName string) {
+	// 去重：已存在则跳过
+	for _, n := range orm.FieldOrder {
+		if n == fieldName {
+			return
+		}
+	}
+	orm.FieldOrder = append(orm.FieldOrder, fieldName)
 }
 
 func (b *ORMBuilder) parseAssociations(msg *protogen.Message, g *protogen.GeneratedFile) {
@@ -542,6 +558,8 @@ func (b *ORMBuilder) parseAssociations(msg *protogen.Message, g *protogen.Genera
 			// Register type used, in case it's an imported type from another package
 			// b.GetFileImports().typesToRegister = append(b.GetFileImports().typesToRegister, fieldType) // maybe we need other fields type
 			ormable.Fields[fieldName] = &Field{TypeName: fieldType, GormFieldOptions: fieldOpts, Type: assocOrmable, FieldAssociationInfo: fInfo}
+
+			b.addFieldToOrder(ormable, fieldName)
 		}
 	}
 }
@@ -739,6 +757,7 @@ func (b *ORMBuilder) parseHasOne(msg *protogen.Message, parent *OrmableType, fie
 	}
 	if exField, ok := child.Fields[foreignKeyName]; !ok {
 		child.Fields[foreignKeyName] = foreignKey
+		b.addFieldToOrder(child, foreignKeyName)
 	} else {
 		if exField.TypeName == "interface{}" {
 			exField.TypeName = foreignKey.TypeName
@@ -798,6 +817,7 @@ func (b *ORMBuilder) parseHasMany(msg *protogen.Message, parent *OrmableType, fi
 	}
 	if exField, ok := child.Fields[foreignKeyName]; !ok {
 		child.Fields[foreignKeyName] = foreignKey
+		b.addFieldToOrder(child, foreignKeyName)
 	} else {
 		if exField.TypeName == "interface{}" {
 			exField.TypeName = foreignKey.TypeName
@@ -812,6 +832,7 @@ func (b *ORMBuilder) parseHasMany(msg *protogen.Message, parent *OrmableType, fi
 	if posField = camelCase(hasMany.GetPositionField()); posField != "" {
 		if exField, ok := child.Fields[posField]; !ok {
 			child.Fields[posField] = &Field{TypeName: "int", GormFieldOptions: &gormopts.GormFieldOptions{Tag: hasMany.GetPositionFieldTag()}}
+			b.addFieldToOrder(child, posField)
 		} else {
 			if !strings.Contains(exField.TypeName, "int") {
 				panic(fmt.Sprintf("Cannot include %s field into %s as it already exists there with a different type.",
@@ -862,6 +883,7 @@ func (b *ORMBuilder) parseBelongsTo(msg *protogen.Message, child *OrmableType, f
 	belongsTo.Foreignkey = foreignKeyName
 	if exField, ok := child.Fields[foreignKeyName]; !ok {
 		child.Fields[foreignKeyName] = foreignKey
+		b.addFieldToOrder(child, foreignKeyName)
 	} else {
 		if exField.TypeName == "interface{}" {
 			exField.TypeName = foreignKeyType
@@ -1041,12 +1063,14 @@ func (b *ORMBuilder) parseBasicFields(msg *protogen.Message, g *protogen.Generat
 		}
 
 		ormable.Fields[fieldName] = f
+		b.addFieldToOrder(ormable, fieldName)
 	}
 
 	gormMsgOptions := getMessageOptions(msg)
 	if gormMsgOptions.GetMultiAccount() {
 		if accID, ok := ormable.Fields["AccountID"]; !ok {
 			ormable.Fields["AccountID"] = &Field{TypeName: "string"}
+			b.addFieldToOrder(ormable, "AccountID")
 		} else if accID.TypeName != "string" {
 			panic("cannot include AccountID field")
 		}
@@ -1055,6 +1079,7 @@ func (b *ORMBuilder) parseBasicFields(msg *protogen.Message, g *protogen.Generat
 	if gormMsgOptions.GetMultiCompartment() {
 		if comID, ok := ormable.Fields["CompartmentID"]; !ok {
 			ormable.Fields["CompartmentID"] = &Field{TypeName: "string"}
+			b.addFieldToOrder(ormable, "CompartmentID")
 		} else if comID.TypeName != "string" {
 			panic("cannot include CompartmentID field")
 		}
@@ -1305,7 +1330,7 @@ func (b *ORMBuilder) renderGormTag(field *Field) string {
 		gormRes += fmt.Sprintf("serializer:%s;", tag.GetSerializer())
 	}
 
-	var foreignKey, associationForeignKey, joinTable, joinTableForeignKey, associationJoinTableForeignKey string
+	var foreignKey, associationForeignKey, joinTable, joinTableForeignKey, associationJoinTableForeignKey, constraint string
 	var replace, append, clear bool
 	if hasOne := field.GetHasOne(); hasOne != nil {
 		foreignKey = hasOne.Foreignkey
@@ -1358,6 +1383,9 @@ func (b *ORMBuilder) renderGormTag(field *Field) string {
 	}
 	if len(associationJoinTableForeignKey) > 0 {
 		gormRes += fmt.Sprintf("joinReferences:%s;", associationJoinTableForeignKey)
+	}
+	if len(constraint) > 0 {
+		gormRes += fmt.Sprintf("constraint:%s;", constraint)
 	}
 
 	if clear {
